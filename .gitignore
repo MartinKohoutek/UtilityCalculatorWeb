@@ -1,0 +1,15 @@
+# Node / pnpm
+node_modules/
+.pnpm-store/
+.pnpm-debug.log
+
+# Vite / frontend
+apps/frontend/dist/
+apps/frontend/node_modules/
+
+# Husky
+.husky/_/
+
+# IDE / OS
+.vscode/
+.DS_Store
