@@ -1,0 +1,212 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  
+env:
+  HUSKY: 0
+  
+jobs:
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    outputs:
+      backend: ${{ steps.filter.outputs.backend }}
+      frontend: ${{ steps.filter.outputs.frontend }}
+      e2e: ${{ steps.filter.outputs.e2e }}
+      workflow: ${{ steps.filter.outputs.workflow }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Detect modified paths
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            backend:
+              - 'apps/backend/**'
+            frontend:
+              - 'apps/frontend/**'
+            e2e:
+              - 'apps/e2e/**'
+            workflow:
+              - '.github/workflows/**'
+
+  build-backend:
+    name: Build Backend
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.backend == 'true' || needs.changes.outputs.workflow == 'true'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache Gradle
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper/
+          key: gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Make Gradle wrapper executable
+        working-directory: apps/backend
+        run: chmod +x gradlew
+
+      - name: Build backend
+        working-directory: apps/backend
+        run: ./gradlew build --no-daemon
+
+  deploy-backend:
+    name: Deploy Backend to Fly.io
+    runs-on: ubuntu-latest
+    needs: build-backend
+    if: |
+      vars.ENABLE_BACKEND_DEPLOY == 'true' && 
+      (needs.changes.outputs.backend == 'true' || needs.changes.outputs.workflow == 'true')
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Fly CLI
+        run: |
+          curl -L https://fly.io/install.sh | sh
+          echo "$HOME/.fly/bin" >> $GITHUB_PATH      
+
+      - name: Deploy backend on fly.io
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          cd apps/backend
+          fly deploy --config fly.toml --remote-only
+          
+  build-frontend:
+    name: Build Frontend
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true' || needs.changes.outputs.workflow == 'true'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache PNPM store
+        uses: actions/cache@v3
+        with:
+          path: ~/.pnpm-store
+          key: pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+
+      - name: Setup PNPM
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.24.0
+          run_install: false
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        working-directory: apps/frontend
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        working-directory: apps/frontend
+        run: pnpm lint
+
+      - name: Prettier check
+        working-directory: apps/frontend
+        run: pnpm prettier --check .
+
+      - name: Build frontend
+        working-directory: apps/frontend
+        run: pnpm build
+        
+      - name: Upload frontend dist
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: apps/frontend/dist
+
+      - name: Start preview server
+        working-directory: apps/frontend
+        run: pnpm run preview --port 5173 &
+
+      - name: Wait for frontend
+        run: npx wait-on http://localhost:5173
+
+  e2e-tests:
+    name: Run E2E tests
+    runs-on: ubuntu-latest
+    needs: [changes, build-frontend]
+    if: vars.ENABLE_TESTS == 'true' && (needs.changes.outputs.e2e == 'true' || needs.changes.outputs.workflow == 'true')
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Download frontend dist
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: apps/frontend/dist
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          
+      - name: Cache Playwright
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('apps/e2e/pnpm-lock.yaml') }}
+          restore-keys: |
+            playwright-${{ runner.os }}    
+          
+      - name: Setup PNPM
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.24.0
+          run_install: true
+
+      - name: Install test deps
+        working-directory: apps/e2e
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Playwright browsers
+        working-directory: apps/e2e
+        run: pnpm exec playwright install --with-deps
+        
+      #- name: Install frontend deps
+      #  working-directory: apps/frontend
+      #  run: pnpm install --frozen-lockfile
+
+      #- name: Build frontend
+      #  working-directory: apps/frontend
+      #  run: pnpm build
+
+      - name: Start preview server
+        working-directory: apps/frontend
+        run: pnpm run preview --port 5173 &
+
+      - name: Wait for frontend
+        run: npx wait-on http://localhost:5173
+
+      - name: Run tests
+        working-directory: apps/e2e
+        run: pnpm exec playwright test --reporter=html
+
+      - name: Upload Playwright report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: playwright-report
+          path: apps/e2e/playwright-report
