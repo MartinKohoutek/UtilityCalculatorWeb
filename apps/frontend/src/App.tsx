@@ -1,7 +1,7 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState } from 'react';
 
 function App() {
-  const [message, setMessage] = useState<string>("");
+  const [message, setMessage] = useState<string>('');
 
   const API_URL = import.meta.env.VITE_API_URL;
 
@@ -9,7 +9,7 @@ function App() {
     fetch(`${API_URL}/api/hello`)
       .then((res) => res.text())
       .then((data) => setMessage(data))
-      .catch((err) => setMessage("Error: " + err.message));
+      .catch((err) => setMessage('Error: ' + err.message));
   }, [API_URL]);
 
   return (
